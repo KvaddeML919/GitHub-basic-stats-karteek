@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from logger import info
 from openpyxl.utils import get_column_letter
 
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
@@ -119,20 +120,20 @@ def _fmt_val(val: Any, fmt: str = "", prefix: str = "", suffix: str = "", na: st
 
 def print_console_tables(results: List[Row], team_avg: Optional[Row] = None) -> None:
     """Print the Activity and Collaboration summary tables to stdout."""
-    print(f"\n{'─' * 110}")
-    print("ACTIVITY")
+    info(f"\n{'─' * 110}")
+    info("ACTIVITY")
     hdr1 = (f"{'Username':<20} {'PRs':>6} {'PRs/Day':>8} {'Merged%':>8} "
             f"{'Commits':>8} {'Commits/Day':>12} {'Coding Days':>12} "
             f"{'Wknd Commits':>13}")
-    print(hdr1)
-    print("─" * len(hdr1))
+    info(hdr1)
+    info("─" * len(hdr1))
 
     def _print_activity_row(r: Row) -> None:
         cd_str = _fmt_val(r.get("avg_coding_days_per_week"))
         prs = _fmt_val(r.get("total_prs"), na="")
         commits = _fmt_val(r.get("total_commits"), na="")
         wknd = _fmt_val(r.get("weekend_commits"), na="")
-        print(f"{r.get('username', ''):<20} "
+        info(f"{r.get('username', ''):<20} "
               f"{prs:>6} "
               f"{_fmt_val(r.get('prs_per_working_day')):>8} "
               f"{_fmt_val(r.get('merge_rate_pct'), suffix='%'):>8} "
@@ -144,22 +145,22 @@ def print_console_tables(results: List[Row], team_avg: Optional[Row] = None) -> 
     for r in results:
         _print_activity_row(r)
     if team_avg:
-        print("─" * len(hdr1))
+        info("─" * len(hdr1))
         _print_activity_row(team_avg)
 
-    print(f"\n{'─' * 120}")
-    print("COLLABORATION & QUALITY")
+    info(f"\n{'─' * 120}")
+    info("COLLABORATION & QUALITY")
     hdr2 = (f"{'Username':<20} {'Reviews':>8} {'Commented':>10} "
             f"{'Merge Time':>11} {'Repos':>6}")
-    print(hdr2)
-    print("─" * len(hdr2))
+    info(hdr2)
+    info("─" * len(hdr2))
 
     def _print_collab_row(r: Row) -> None:
         merge_str = _fmt_val(r.get("avg_merge_time_hrs"), suffix="h")
         reviews = _fmt_val(r.get("reviews_given"), na="")
         commented = _fmt_val(r.get("prs_commented_on"), na="")
         repos = _fmt_val(r.get("active_repos"), na="")
-        print(f"{r.get('username', ''):<20} "
+        info(f"{r.get('username', ''):<20} "
               f"{reviews:>8} "
               f"{commented:>10} "
               f"{merge_str:>11} "
@@ -168,5 +169,5 @@ def print_console_tables(results: List[Row], team_avg: Optional[Row] = None) -> 
     for r in results:
         _print_collab_row(r)
     if team_avg:
-        print("─" * len(hdr2))
+        info("─" * len(hdr2))
         _print_collab_row(team_avg)

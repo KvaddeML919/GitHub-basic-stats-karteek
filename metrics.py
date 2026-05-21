@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-MYT = timezone(timedelta(hours=8))
+from config import MYT
 
 
 def parse_iso(ts: str) -> datetime:

@@ -8,16 +8,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-GITHUB_API = "https://api.github.com"
+from config import (
+    GITHUB_API,
+    SEARCH_API_DELAY_SECONDS,
+    MAX_RATE_LIMIT_WAIT,
+    PR_BRANCH_WORKERS,
+    config,
+)
+from logger import info, warning, error
 
-SEARCH_API_DELAY_SECONDS = 2.5
-
-MAX_RATE_LIMIT_WAIT = 120
-
-PR_BRANCH_WORKERS = 8
-
+# Type aliases for better type safety
 Headers = Dict[str, str]
 SearchResult = Tuple[int, List[Dict[str, Any]]]
+GitHubItem = Dict[str, Any]
+CommitItem = Dict[str, Any]
+PullRequestItem = Dict[str, Any]
 
 
 def _handle_rate_limit(resp: requests.Response, attempt: int, max_attempts: int) -> int:
@@ -26,7 +31,13 @@ def _handle_rate_limit(resp: requests.Response, attempt: int, max_attempts: int)
     wait = max(reset_ts - int(time.time()), 5)
     if wait > MAX_RATE_LIMIT_WAIT:
         wait = MAX_RATE_LIMIT_WAIT
-    print(f"    Rate limited (attempt {attempt}/{max_attempts}). Waiting {wait}s ...")
+
+    remaining = resp.headers.get("X-RateLimit-Remaining", "0")
+    limit = resp.headers.get("X-RateLimit-Limit", "unknown")
+
+    info(f"    Rate limited (attempt {attempt}/{max_attempts}). "
+         f"Remaining: {remaining}/{limit}. Waiting {wait}s ...")
+
     time.sleep(wait)
     return wait
 
@@ -44,16 +55,24 @@ def _search_request(
         req_headers["Accept"] = accept
     params = {**params, "per_page": per_page, "page": 1}
 
-    for attempt in range(1, 4):
+    for attempt in range(1, config.max_retries + 1):
         try:
-            resp = requests.get(url, params=params, headers=req_headers, timeout=30)
+            resp = requests.get(url, params=params, headers=req_headers, timeout=config.request_timeout_seconds)
+        except requests.exceptions.Timeout:
+            error(f"    Request timeout (attempt {attempt}/{config.max_retries}): {config.request_timeout_seconds}s timeout exceeded")
+            time.sleep(5 * attempt)
+            continue
+        except requests.exceptions.ConnectionError as exc:
+            error(f"    Connection error (attempt {attempt}/{config.max_retries}): {exc}")
+            time.sleep(5 * attempt)
+            continue
         except requests.exceptions.RequestException as exc:
-            print(f"    Request error (attempt {attempt}/3): {exc}")
+            error(f"    Request error (attempt {attempt}/{config.max_retries}): {exc}")
             time.sleep(5 * attempt)
             continue
 
         if resp.status_code == 403:
-            _handle_rate_limit(resp, attempt, 3)
+            _handle_rate_limit(resp, attempt, config.max_retries)
             continue
 
         if resp.status_code == 422:
@@ -63,7 +82,7 @@ def _search_request(
         data = resp.json()
         return data.get("total_count", 0), data.get("items", [])
 
-    print("    Max retries exceeded")
+    error("    Max retries exceeded")
     return 0, []
 
 
@@ -82,10 +101,10 @@ def _search_all_items(
 ) -> SearchResult:
     """Paginate through all search results (GitHub caps at 1000)."""
     url = f"{GITHUB_API}{endpoint}"
-    all_items: List[Dict[str, Any]] = []
+    all_items: List[GitHubItem] = []
     total_count = 0
     page = 1
-    per_page = 100
+    per_page = config.search_results_per_page
 
     while True:
         req_headers = {**headers}
@@ -94,15 +113,15 @@ def _search_all_items(
         params = {"q": query, "per_page": per_page, "page": page}
 
         success = False
-        for attempt in range(1, 4):
+        for attempt in range(1, config.max_retries + 1):
             try:
-                resp = requests.get(url, params=params, headers=req_headers, timeout=30)
+                resp = requests.get(url, params=params, headers=req_headers, timeout=config.request_timeout_seconds)
             except requests.exceptions.RequestException as exc:
-                print(f"    Request error (attempt {attempt}/3): {exc}")
+                error(f"    Request error (attempt {attempt}/{config.max_retries}): {exc}")
                 time.sleep(5 * attempt)
                 continue
             if resp.status_code == 403:
-                _handle_rate_limit(resp, attempt, 3)
+                _handle_rate_limit(resp, attempt, config.max_retries)
                 continue
             if resp.status_code == 422:
                 return 0, []
@@ -111,7 +130,7 @@ def _search_all_items(
             break
 
         if not success:
-            print("    Max retries exceeded")
+            error("    Max retries exceeded")
             break
 
         data = resp.json()
@@ -215,8 +234,8 @@ def get_prs_commented_on(username: str, since: str, headers: Headers, org: str) 
 # ---------------------------------------------------------------------------
 
 def fetch_pr_branch_commits(
-    pr_items: List[Dict[str, Any]], headers: Headers, username: str,
-) -> List[Dict[str, Any]]:
+    pr_items: List[PullRequestItem], headers: Headers, username: str,
+) -> List[CommitItem]:
     """Fetch commit objects from PR branches authored by ``username``.
 
     GitHub's commit search only indexes default-branch commits. For
@@ -229,11 +248,11 @@ def fetch_pr_branch_commits(
     total = len(pr_items)
     if not total:
         return []
-    print(f"  Fetching PR branch commits ({total} PRs) ...")
+    info(f"  Fetching PR branch commits ({total} PRs) ...")
 
     uname = username.lower()
 
-    def _fetch_commits_for_pr(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _fetch_commits_for_pr(item: PullRequestItem) -> List[CommitItem]:
         pr_url = (item.get("pull_request") or {}).get("url")
         if not pr_url:
             return []
@@ -243,8 +262,8 @@ def fetch_pr_branch_commits(
             resp = requests.get(
                 f"{pr_url}/commits",
                 headers=headers,
-                params={"per_page": 250},
-                timeout=30,
+                params={"per_page": config.commits_per_page},
+                timeout=config.request_timeout_seconds,
             )
             if resp.status_code == 200:
                 result = []
@@ -257,18 +276,19 @@ def fetch_pr_branch_commits(
                     result.append(c)
                 return result
         except requests.exceptions.RequestException as exc:
-            print(f"    Warning: failed to fetch commits for PR: {exc}")
+            warning(f"    Warning: failed to fetch commits for PR: {exc}")
         return []
 
-    commits: List[Dict[str, Any]] = []
-    seen_shas: set = set()
+    # Use dict for O(1) lookups and to maintain order
+    commits_by_sha: Dict[str, CommitItem] = {}
+
     with ThreadPoolExecutor(max_workers=PR_BRANCH_WORKERS) as pool:
         for batch in pool.map(_fetch_commits_for_pr, pr_items):
-            for c in batch:
-                sha = c.get("sha")
-                if sha and sha not in seen_shas:
-                    seen_shas.add(sha)
-                    commits.append(c)
-    return commits
+            for commit in batch:
+                sha = commit.get("sha")
+                if sha and sha not in commits_by_sha:
+                    commits_by_sha[sha] = commit
+
+    return list(commits_by_sha.values())
 
 

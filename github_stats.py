@@ -11,10 +11,14 @@ from typing import Any, Dict, List, Tuple
 import requests
 from openpyxl import Workbook
 
-from github_api import (
+from config import (
     GITHUB_API,
     SEARCH_API_DELAY_SECONDS,
     PR_BRANCH_WORKERS,
+    DEFAULT_LOOKBACK_DAYS,
+    config,
+)
+from github_api import (
     delay,
     get_pr_count,
     get_merged_prs,
@@ -40,16 +44,18 @@ from output import (
     write_stats_sheet,
     print_console_tables,
 )
+from logger import info, warning, error
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TEAM_FILE = os.path.join(SCRIPT_DIR, "team.txt")
-ORG_FILE = os.path.join(SCRIPT_DIR, "org.txt")
+TEAM_FILE = os.path.join(SCRIPT_DIR, config.team_file_name)
+ORG_FILE = os.path.join(SCRIPT_DIR, config.org_file_name)
 
-DEFAULT_LOOKBACK_DAYS = 90
-
+# Type aliases for better type safety
 Headers = Dict[str, str]
-Teams = OrderedDict  # OrderedDict[str, List[str]]
-Row = Dict[str, Any]
+Teams = OrderedDict[str, List[str]]
+UserRow = Dict[str, Any]  # User metrics row
+GitHubItem = Dict[str, Any]
+CommitItem = Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -60,24 +66,38 @@ def get_token() -> str:
     """Read token from GITHUB_TOKEN env var, or prompt interactively."""
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
-        print("No GITHUB_TOKEN environment variable found.")
-        print("Create a Classic token at https://github.com/settings/tokens")
-        print("Required scopes: repo, read:org  (+ SSO authorize for your org)\n")
+        info("No GITHUB_TOKEN environment variable found.")
+        info("Create a Classic token at https://github.com/settings/tokens")
+        info("Required scopes: repo, read:org  (+ SSO authorize for your org)\n")
         token = input("Paste your GitHub token: ").strip()
         if not token:
-            print("Error: No token provided.")
+            error("Error: No token provided.")
             sys.exit(1)
     return token
 
 
 def validate_token(token: str, org: str) -> None:
     """Check token validity, required scopes, and org access. Exits on failure."""
+    if not token or not token.strip():
+        error("Error: GitHub token is empty or invalid.")
+        sys.exit(1)
+
+    if not org or not org.strip():
+        error("Error: GitHub organization name is empty or invalid.")
+        sys.exit(1)
+
     headers = {"Authorization": f"token {token}"}
 
-    resp = requests.get(f"{GITHUB_API}/user", headers=headers, timeout=15)
+    try:
+        resp = requests.get(f"{GITHUB_API}/user", headers=headers, timeout=config.request_timeout_seconds)
+    except requests.exceptions.RequestException as exc:
+        error(f"Error: Failed to connect to GitHub API: {exc}")
+        sys.exit(1)
+
     if resp.status_code == 401:
-        print("\nError: Token is invalid or expired.")
-        print("Create a new token at https://github.com/settings/tokens")
+        error("\nError: Token is invalid or expired.")
+        error("Create a new token at https://github.com/settings/tokens")
+        error("Required scopes: repo, read:org (+ SSO authorize for your org)")
         sys.exit(1)
 
     scopes = resp.headers.get("X-OAuth-Scopes", "")
@@ -90,31 +110,44 @@ def validate_token(token: str, org: str) -> None:
         missing.append("read:org")
 
     if missing:
-        print(f"\nError: Token is missing required scope(s): {', '.join(missing)}")
-        print(f"  Your token has: {scopes or '(none)'}")
-        print("  Go to https://github.com/settings/tokens, edit your token,")
-        print("  and enable: repo (top-level checkbox) + read:org")
+        error(f"\nError: Token is missing required scope(s): {', '.join(missing)}")
+        error(f"  Your token has: {scopes or '(none)'}")
+        error("  Go to https://github.com/settings/tokens, edit your token,")
+        error("  and enable: repo (top-level checkbox) + read:org")
         sys.exit(1)
 
     user = resp.json().get("login", "unknown")
-    print(f"Token valid (authenticated as {user})")
+    info(f"Token valid (authenticated as {user})")
 
-    org_resp = requests.get(
-        f"{GITHUB_API}/orgs/{org}/repos",
-        headers={**headers, "Accept": "application/vnd.github.v3+json"},
-        params={"per_page": 1},
-        timeout=15,
-    )
-    if org_resp.status_code in (403, 404):
-        print(f"\nWarning: Cannot access the {org} org.")
-        print("  If the org uses SAML SSO, you need to authorize the token:")
-        print("  1. Go to https://github.com/settings/tokens")
-        print("  2. Click 'Configure SSO' next to your token")
-        print(f"  3. Authorize it for {org}")
-        print()
+    try:
+        org_resp = requests.get(
+            f"{GITHUB_API}/orgs/{org}/repos",
+            headers={**headers, "Accept": "application/vnd.github.v3+json"},
+            params={"per_page": 1},
+            timeout=config.request_timeout_seconds,
+        )
+    except requests.exceptions.RequestException as exc:
+        error(f"Error: Failed to check organization access: {exc}")
+        sys.exit(1)
+
+    if org_resp.status_code == 404:
+        error(f"\nError: Organization '{org}' not found.")
+        error("  Check the organization name and ensure it exists.")
+        sys.exit(1)
+    elif org_resp.status_code == 403:
+        warning(f"\nWarning: Cannot access the {org} organization.")
+        warning("  If the org uses SAML SSO, you need to authorize the token:")
+        warning("  1. Go to https://github.com/settings/tokens")
+        warning("  2. Click 'Configure SSO' next to your token")
+        warning(f"  3. Authorize it for {org}")
+        info("")
         proceed = input("Continue anyway? [y/N]: ").strip().lower()
         if proceed != "y":
             sys.exit(1)
+    elif not org_resp.ok:
+        error(f"Error: Unexpected response when checking org access: {org_resp.status_code}")
+        error(f"Response: {org_resp.text[:200]}")
+        sys.exit(1)
 
 
 def load_org() -> str:
@@ -123,23 +156,23 @@ def load_org() -> str:
         with open(ORG_FILE) as fh:
             org = fh.read().strip()
             if org:
-                print(f"Organization: {org}")
+                info(f"Organization: {org}")
                 return org
     org = input("Enter the GitHub organization name: ").strip()
     if not org:
-        print("Error: No organization name provided.")
+        error("Error: No organization name provided.")
         sys.exit(1)
     with open(ORG_FILE, "w") as fh:
         fh.write(org + "\n")
-    print(f"Saved org '{org}' to {ORG_FILE}")
+    info(f"Saved org '{org}' to {ORG_FILE}")
     return org
 
 
 def _create_team_interactive() -> Tuple[List[str], Teams]:
     """Walk the user through creating teams and members interactively."""
-    print("No team file found. Let's set up your teams now.\n")
-    print("You'll enter team names first, then GitHub usernames for each team.")
-    print("Press Enter on an empty line to finish each step.\n")
+    info("No team file found. Let's set up your teams now.\n")
+    info("You'll enter team names first, then GitHub usernames for each team.")
+    info("Press Enter on an empty line to finish each step.\n")
 
     teams: Teams = OrderedDict()
     total_members = 0
@@ -150,7 +183,7 @@ def _create_team_interactive() -> Tuple[List[str], Teams]:
             break
 
         teams[team_name] = []
-        print(f"    Adding members to {team_name}...")
+        info(f"    Adding members to {team_name}...")
 
         while True:
             username = input("      GitHub username (empty to finish this team): ").strip()
@@ -159,10 +192,10 @@ def _create_team_interactive() -> Tuple[List[str], Teams]:
             teams[team_name].append(username)
             total_members += 1
 
-        print(f"    Added {len(teams[team_name])} member(s) to {team_name}.\n")
+        info(f"    Added {len(teams[team_name])} member(s) to {team_name}.\n")
 
     if total_members == 0:
-        print("Error: No team members added.")
+        error("Error: No team members added.")
         sys.exit(1)
 
     with open(TEAM_FILE, "w") as fh:
@@ -172,7 +205,7 @@ def _create_team_interactive() -> Tuple[List[str], Teams]:
                 fh.write(f"{m}\n")
             fh.write("\n")
 
-    print(f"Saved {total_members} member(s) across {len(teams)} team(s) to {TEAM_FILE}\n")
+    info(f"Saved {total_members} member(s) across {len(teams)} team(s) to {TEAM_FILE}\n")
 
     all_members = [u for members in teams.values() for u in members]
     return all_members, teams
@@ -208,7 +241,7 @@ def load_team_members() -> Tuple[List[str], Teams]:
 
     all_members = [u for members in teams.values() for u in members]
     if not all_members:
-        print("Error: team.txt is empty. Add at least one GitHub username.")
+        info("Error: team.txt is empty. Add at least one GitHub username.")
         sys.exit(1)
 
     return all_members, teams
@@ -236,9 +269,9 @@ def get_lookback_days() -> int:
             days = int(raw)
             if days > 0:
                 return days
-            print("  Please enter a positive number.")
+            info("  Please enter a positive number.")
         except ValueError:
-            print("  Please enter a valid number.")
+            info("  Please enter a valid number.")
 
 
 def choose_team(teams: Teams) -> Tuple[List[str], Teams]:
@@ -253,10 +286,10 @@ def choose_team(teams: Teams) -> Tuple[List[str], Teams]:
     if len(team_names) <= 1:
         return all_members, teams
 
-    print(f"\nTeams found: {len(team_names)}")
-    print(f"  0. All teams ({len(all_members)} members)")
+    info(f"\nTeams found: {len(team_names)}")
+    info(f"  0. All teams ({len(all_members)} members)")
     for i, name in enumerate(team_names, 1):
-        print(f"  {i}. {name} ({len(teams[name])} members)")
+        info(f"  {i}. {name} ({len(teams[name])} members)")
 
     while True:
         raw = input("\nRun report for which team? [0 = All]: ").strip()
@@ -268,29 +301,20 @@ def choose_team(teams: Teams) -> Tuple[List[str], Teams]:
                 picked = team_names[choice - 1]
                 picked_teams = OrderedDict([(picked, teams[picked])])
                 return teams[picked], picked_teams
-            print(f"  Please enter a number between 0 and {len(team_names)}.")
+            info(f"  Please enter a number between 0 and {len(team_names)}.")
         except ValueError:
-            print("  Please enter a valid number.")
+            info("  Please enter a valid number.")
 
 
 # ---------------------------------------------------------------------------
 # Per-user data collection
 # ---------------------------------------------------------------------------
 
-def _collect_user_stats(
-    username: str,
-    index: int,
-    total: int,
-    since_date: str,
-    since: datetime,
-    end: datetime,
-    working_days: int,
-    headers: Headers,
-    org: str,
-) -> Row:
-    """Fetch all API data for a single user and compute derived metrics."""
-    print(f"\n[{index}/{total}] {username}")
-
+def _collect_api_data(
+    username: str, since_date: str, headers: Headers, org: str, index: int, total: int
+) -> Tuple[int, List[GitHubItem], List[GitHubItem], List[GitHubItem], List[GitHubItem],
+           int, List[GitHubItem], int, int]:
+    """Collect raw data from GitHub API for a user."""
     print("  Fetching search data ...", end="", flush=True)
     pr_count = get_pr_count(username, since_date, headers, org)
     delay()
@@ -319,24 +343,54 @@ def _collect_user_stats(
     print(f" done ({pr_count} PRs, {commit_count} commits, "
           f"+{len(old_open_items)} old open, +{len(old_merged_items)} old merged)")
 
+    return (pr_count, merged_items, unmerged_items, old_merged_items, old_open_items,
+            merged_count, commit_items, reviews_given, prs_commented)
+
+
+def _process_commits(
+    merged_items: List[GitHubItem], unmerged_items: List[GitHubItem],
+    old_merged_items: List[GitHubItem], old_open_items: List[GitHubItem],
+    commit_items: List[GitHubItem], headers: Headers, username: str,
+    since: datetime, end: datetime
+) -> Tuple[List[CommitItem], int]:
+    """Process and filter commits from both search and PR branches."""
+    # Efficiently combine and dedupe PR items
     all_pr_items = _dedupe_pr_items(
         merged_items + unmerged_items + old_merged_items + old_open_items,
     )
 
     pr_branch_commits = fetch_pr_branch_commits(all_pr_items, headers, username)
-    search_shas = {item.get("sha") for item in commit_items}
-    unique_pr_commits = [
-        c for c in pr_branch_commits if c.get("sha") not in search_shas
-    ]
 
+    # Use set for O(1) lookup instead of list comprehension with 'in' check
+    search_shas = {item.get("sha") for item in commit_items if item.get("sha")}
+
+    # Filter PR commits more efficiently
+    unique_pr_commits = []
+    for commit in pr_branch_commits:
+        sha = commit.get("sha")
+        if sha and sha not in search_shas:
+            unique_pr_commits.append(commit)
+
+    # Combine all commits and filter by window
     all_commit_items = _filter_commits_by_window(
         commit_items + unique_pr_commits, since, end,
     )
-    non_merge_items = [
-        c for c in all_commit_items if len(c.get("parents", [])) <= 1
-    ]
-    total_commit_count = len(non_merge_items)
 
+    # Count non-merge commits efficiently
+    total_commit_count = sum(
+        1 for c in all_commit_items if len(c.get("parents", [])) <= 1
+    )
+
+    return all_commit_items, total_commit_count
+
+
+def _compute_user_metrics(
+    pr_count: int, merged_count: int, merged_items: List[GitHubItem],
+    all_commit_items: List[CommitItem], total_commit_count: int,
+    working_days: int, since: datetime, end: datetime,
+    reviews_given: int, prs_commented: int
+) -> UserRow:
+    """Compute derived metrics from API data."""
     prs_per_wd = round(pr_count / working_days, 2) if working_days else 0
     merge_rate = round(merged_count / pr_count * 100, 1) if pr_count else 0.0
     avg_merge_hrs = compute_avg_merge_hours(merged_items)
@@ -352,8 +406,7 @@ def _collect_user_stats(
     )
     active_repos = count_active_repos(all_commit_items)
 
-    result: Row = {
-        "username": username,
+    return {
         "total_prs": pr_count,
         "prs_per_working_day": prs_per_wd,
         "merged_prs": merged_count,
@@ -368,51 +421,114 @@ def _collect_user_stats(
         "prs_commented_on": prs_commented,
     }
 
+
+def _collect_user_stats(
+    username: str,
+    index: int,
+    total: int,
+    since_date: str,
+    since: datetime,
+    end: datetime,
+    working_days: int,
+    headers: Headers,
+    org: str,
+) -> UserRow:
+    """Fetch all API data for a single user and compute derived metrics."""
+    info(f"\n[{index}/{total}] {username}")
+
+    # Collect raw API data
+    (pr_count, merged_items, unmerged_items, old_merged_items, old_open_items,
+     merged_count, commit_items, reviews_given, prs_commented) = _collect_api_data(
+        username, since_date, headers, org, index, total
+    )
+
+    # Process commits from search and PR branches
+    all_commit_items, total_commit_count = _process_commits(
+        merged_items, unmerged_items, old_merged_items, old_open_items,
+        commit_items, headers, username, since, end
+    )
+
+    # Compute metrics
+    metrics = _compute_user_metrics(
+        pr_count, merged_count, merged_items, all_commit_items, total_commit_count,
+        working_days, since, end, reviews_given, prs_commented
+    )
+
+    # Add username to result
+    result: UserRow = {"username": username, **metrics}
+
     _print_user_summary(result)
     return result
 
 
-def _dedupe_pr_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Deduplicate PR items by URL."""
-    seen: set = set()
-    deduped: List[Dict[str, Any]] = []
+def _dedupe_pr_items(items: List[GitHubItem]) -> List[GitHubItem]:
+    """Deduplicate PR items by URL using efficient dict-based approach."""
+    if not items:
+        return []
+
+    # Use dict to maintain insertion order while deduplicating
+    unique_items: Dict[str, GitHubItem] = {}
+
     for item in items:
         url = item.get("html_url") or item.get("url")
-        if url and url not in seen:
-            seen.add(url)
-            deduped.append(item)
-    return deduped
+        if url and url not in unique_items:
+            unique_items[url] = item
+
+    return list(unique_items.values())
 
 
 def _filter_commits_by_window(
-    commit_items: List[Dict[str, Any]], since: datetime, end: datetime,
-) -> List[Dict[str, Any]]:
+    commit_items: List[CommitItem], since: datetime, end: datetime,
+) -> List[CommitItem]:
     """Keep only commits whose author date falls within the lookback window."""
-    filtered: List[Dict[str, Any]] = []
+    if not commit_items:
+        return []
+
+    filtered: List[CommitItem] = []
+    since_date = since.date()
+    end_date = end.date()
+
     for item in commit_items:
-        date_str = item.get("commit", {}).get("author", {}).get("date")
+        # Use more efficient nested dict access
+        commit_data = item.get("commit")
+        if not commit_data:
+            filtered.append(item)
+            continue
+
+        author_data = commit_data.get("author")
+        if not author_data:
+            filtered.append(item)
+            continue
+
+        date_str = author_data.get("date")
         if not date_str:
             filtered.append(item)
             continue
-        dt = parse_iso(date_str).astimezone(MYT).date()
-        if since.date() <= dt <= end.date():
+
+        try:
+            dt = parse_iso(date_str).astimezone(MYT).date()
+            if since_date <= dt <= end_date:
+                filtered.append(item)
+        except (ValueError, TypeError):
+            # Include items with invalid dates to avoid losing data
             filtered.append(item)
+
     return filtered
 
 
-def _print_user_summary(r: Row) -> None:
+def _print_user_summary(r: UserRow) -> None:
     """Print a one-shot summary of a single user's stats."""
     def _v(val: Any, suffix: str = "") -> str:
         return f"{val}{suffix}" if val is not None else "N/A"
 
-    print(f"  Activity:  PRs: {r['total_prs']} "
+    info(f"  Activity:  PRs: {r['total_prs']} "
           f"({r['prs_per_working_day']}/working day, {r['merge_rate_pct']}% merged) "
           f"| Commits: {r['total_commits']} ({r['commits_per_coding_day']}/day) "
           f"| Coding days/week: {_v(r['avg_coding_days_per_week'])} "
           f"| Weekend commits: {r['weekend_commits']}")
-    print(f"  Quality:   Merge time: {_v(r['avg_merge_time_hrs'], 'h')} "
+    info(f"  Quality:   Merge time: {_v(r['avg_merge_time_hrs'], 'h')} "
           f"| Active repos: {r['active_repos']}")
-    print(f"  Collab:    Reviews: {r['reviews_given']} "
+    info(f"  Collab:    Reviews: {r['reviews_given']} "
           f"| PRs commented: {r['prs_commented_on']}")
 
 
@@ -421,7 +537,7 @@ def _print_user_summary(r: Row) -> None:
 # ---------------------------------------------------------------------------
 
 def _export_excel(
-    results: List[Row], run_teams: Teams,
+    results: List[UserRow], run_teams: Teams,
 ) -> str:
     """Write results to a timestamped Excel file and return the filename."""
     output_file = f"github_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -429,7 +545,7 @@ def _export_excel(
 
     results_by_user = {r["username"]: r for r in results}
 
-    sheet_sets: List[Tuple[str, List[Row]]] = []
+    sheet_sets: List[Tuple[str, List[UserRow]]] = []
     if len(run_teams) > 1:
         sheet_sets.append(("All", results))
     for team_name, members in run_teams.items():
@@ -445,9 +561,9 @@ def _export_excel(
 
     wb.save(output_file)
 
-    print("\n" + "=" * 90)
+    info("\n" + "=" * 90)
     sheets_desc = ", ".join(name for name, _ in sheet_sets)
-    print(f"Excel exported → {output_file}  (sheets: {sheets_desc})")
+    info(f"Excel exported → {output_file}  (sheets: {sheets_desc})")
     return output_file
 
 
@@ -484,14 +600,14 @@ def main() -> None:
         1,
     )
 
-    print(f"\nGitHub Stats for {total} team members  ({scope_label})")
-    print(f"Org:            {org}")
-    print(f"Period:         {since_date} → {end_date}  "
+    info(f"\nGitHub Stats for {total} team members  ({scope_label})")
+    info(f"Org:            {org}")
+    info(f"Period:         {since_date} → {end_date}  "
           f"({lookback_days} calendar days, {working_days} working days)")
-    print(f"Estimated time: ~{est_min} min")
-    print("=" * 90)
+    info(f"Estimated time: ~{est_min} min")
+    info("=" * 90)
 
-    results: List[Row] = []
+    results: List[UserRow] = []
     for i, username in enumerate(team_members, 1):
         result = _collect_user_stats(
             username, i, total, since_date, since, end, working_days, headers, org,
