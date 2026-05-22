@@ -1,8 +1,30 @@
 """Logging configuration for GitHub Analytics Service."""
 
 import logging
+import os
 import sys
 from typing import Optional
+
+
+def _console_supports_color() -> bool:
+    """Return True if ANSI colors are likely to render correctly."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            for handle_id in (-11, -12):  # stdout, stderr
+                handle = kernel32.GetStdHandle(handle_id)
+                mode = ctypes.c_ulong()
+                if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                    kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            return True
+        except (AttributeError, OSError):
+            return False
+    return True
 
 
 class ColoredFormatter(logging.Formatter):
@@ -19,8 +41,7 @@ class ColoredFormatter(logging.Formatter):
     RESET = '\033[0m'
 
     def format(self, record):
-        # Add color to levelname
-        if record.levelname in self.COLORS:
+        if _console_supports_color() and record.levelname in self.COLORS:
             record.levelname = f"{self.COLORS[record.levelname]}{record.levelname}{self.RESET}"
         return super().format(record)
 

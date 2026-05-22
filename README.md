@@ -2,6 +2,8 @@
 
 A simple command-line tool that pulls **PR, commit, and collaboration metrics** for your engineering team from GitHub. Run it, pick a team, and get a summary table + Excel report in minutes.
 
+Works on **macOS** and **Windows**.
+
 **What you get per engineer:**
 
 | Activity | Collaboration | Quality |
@@ -9,6 +11,18 @@ A simple command-line tool that pulls **PR, commit, and collaboration metrics** 
 | PRs opened, merge rate | Reviews given | Avg merge time |
 | Commits, coding days/week | PRs commented on | Active repos |
 | Weekend commits | | |
+
+---
+
+## Prerequisites
+
+| Requirement | macOS | Windows |
+|---|---|---|
+| **Python 3.9+** | Usually pre-installed or from [python.org](https://www.python.org/downloads/) | Install from [python.org](https://www.python.org/downloads/) — check **"Add python.exe to PATH"** |
+| **Git** | `xcode-select --install` or [git-scm.com](https://git-scm.com) | [Git for Windows](https://git-scm.com/download/win) |
+| **GitHub token** | Classic PAT with `repo` + `read:org` (see Step 1) | Same |
+
+Install folder (both platforms): **`~/github-stats`** (Mac) or **`%USERPROFILE%\github-stats`** (Windows).
 
 ---
 
@@ -33,10 +47,28 @@ You need a **Classic Personal Access Token** to access your org's data.
 
 ### Step 2 — Install
 
+#### macOS
+
 Open **Terminal** (Spotlight → type "Terminal") and paste:
 
 ```bash
 curl -O https://raw.githubusercontent.com/KvaddeML919/github-analytics-service/main/install.sh && bash install.sh
+```
+
+#### Windows
+
+Open **PowerShell** (Start → type "PowerShell") and paste:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+irm https://raw.githubusercontent.com/KvaddeML919/github-analytics-service/main/install.ps1 | iex
+```
+
+If your company blocks `irm | iex`, download and run instead:
+
+```powershell
+curl -o install.ps1 https://raw.githubusercontent.com/KvaddeML919/github-analytics-service/main/install.ps1
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 The installer will ask you a few things:
@@ -56,20 +88,25 @@ When done, you'll see:
   Installation complete!
 =========================================
 
-  To run:  Double-click 'GitHub Stats' on your Desktop
+  To run:  Double-click the shortcut on your Desktop
 ```
+
+| Platform | Desktop shortcut |
+|---|---|
+| macOS | **GitHub Stats** |
+| Windows | **GitHub Stats.bat** |
 
 ### Step 3 — Run
 
-Double-click the **"GitHub Stats"** shortcut on your Desktop.
+Double-click the desktop shortcut (**GitHub Stats** on Mac, **GitHub Stats.bat** on Windows).
 
 The tool will prompt you for:
 
-1. **Your GitHub token** — paste the token from Step 1
+1. **Your GitHub token** — paste the token from Step 1 (or set `GITHUB_TOKEN` in your environment to skip the prompt)
 2. **Which team** — run for all teams or pick one
 3. **Lookback period** — how many days back (default: 90)
 
-It then fetches data from GitHub and prints results to the terminal. When finished, it also saves an Excel file (`github_stats_YYYYMMDD_HHMMSS.xlsx`) in `~/github-stats/`.
+It then fetches data from GitHub and prints results to the terminal. When finished, it also saves an Excel file (`github_stats_YYYYMMDD_HHMMSS.xlsx`) in your install folder.
 
 ---
 
@@ -99,14 +136,14 @@ The Excel file contains the same data with styled headers, alternating row color
 
 ## Day-to-Day Usage
 
-| Task | How |
-|---|---|
-| **Run the tool** | Double-click **"GitHub Stats"** on your Desktop |
-| **Run from terminal** | `cd ~/github-stats && python3 github_stats.py` |
-| **Custom lookback** | `python3 github_stats.py 30` (30 days instead of 90) |
-| **Edit teams** | Edit `~/github-stats/team.txt` in any text editor |
-| **Change org** | Edit `~/github-stats/org.txt` |
-| **Update the tool** | `cd ~/github-stats && git pull` |
+| Task | macOS | Windows |
+|---|---|---|
+| **Run the tool** | Double-click **GitHub Stats** | Double-click **GitHub Stats.bat** |
+| **Run from terminal** | `cd ~/github-stats && python3 github_stats.py` | `cd %USERPROFILE%\github-stats` then `python github_stats.py` |
+| **Custom lookback** | `python3 github_stats.py 30` | `python github_stats.py 30` |
+| **Edit teams** | Edit `~/github-stats/team.txt` | Edit `%USERPROFILE%\github-stats\team.txt` |
+| **Change org** | Edit `~/github-stats/org.txt` | Edit `%USERPROFILE%\github-stats\org.txt` |
+| **Update the tool** | `cd ~/github-stats && git pull` | `cd %USERPROFILE%\github-stats` then `git pull` |
 
 Your `org.txt` and `team.txt` are gitignored, so `git pull` won't overwrite them.
 
@@ -114,7 +151,7 @@ Your `org.txt` and `team.txt` are gitignored, so `git pull` won't overwrite them
 
 ## Team File Format
 
-Edit `~/github-stats/team.txt` to add or remove members:
+Edit `team.txt` in your install folder to add or remove members:
 
 ```
 [Payments]
@@ -193,9 +230,12 @@ All times are in **MYT (UTC+8)**. The lookback window ends at **yesterday** (tod
 | "Token is invalid or expired" | Create a new token at [github.com/settings/tokens](https://github.com/settings/tokens) |
 | "Missing required scope(s): repo" | Edit your token and check the top-level `repo` checkbox |
 | "Cannot access the org" | Authorize SSO for your token (see [Step 1](#step-1--create-a-github-token)) |
+| "Organization not found" | Check `org.txt` — org name must match GitHub exactly |
 | All stats are zero | Token scopes or SSO issue -- check the error messages |
 | Some users show zero | Verify their GitHub username at `github.com/<username>` |
-| `pip: command not found` | Use `pip3 install -r requirements.txt` |
-| `python: command not found` | Use `python3 github_stats.py` |
+| `pip: command not found` | Use `python -m pip install -r requirements.txt` (Windows) or `pip3` (Mac) |
+| `python: command not found` | Install Python and add to PATH; on Windows try `py github_stats.py` |
+| PowerShell script blocked | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use `-ExecutionPolicy Bypass` |
+| Git not found (Windows) | Install [Git for Windows](https://git-scm.com/download/win) and restart PowerShell |
 | Rate limit errors | Wait a few minutes and retry |
 | Slow run | Normal for many PRs -- use a shorter lookback or pick a specific team |

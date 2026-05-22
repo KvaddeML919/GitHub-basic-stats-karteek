@@ -1,4 +1,5 @@
 #!/bin/bash
+# GitHub Team Stats — macOS / Linux installer (Windows: install.ps1)
 set -e
 
 REPO_URL="https://github.com/KvaddeML919/github-analytics-service.git"
