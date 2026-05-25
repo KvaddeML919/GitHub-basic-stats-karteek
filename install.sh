@@ -6,10 +6,46 @@ REPO_URL="https://github.com/KvaddeML919/github-analytics-service.git"
 INSTALL_DIR="$HOME/github-stats"
 SHORTCUT="$HOME/Desktop/GitHub Stats.command"
 
+fail() {
+    echo ""
+    echo "Error: $1"
+    if [ -n "${2:-}" ]; then
+        echo "$2"
+    fi
+    exit 1
+}
+
 echo ""
 echo "========================================="
 echo "  GitHub Team Stats — Installer"
 echo "========================================="
+echo ""
+
+# --- Preflight checks ---
+echo "Checking prerequisites..."
+
+if ! command -v git >/dev/null 2>&1; then
+    fail "Git is not installed or not on PATH." \
+        "  Install: xcode-select --install
+  Or download from https://git-scm.com"
+fi
+echo "  Git: OK"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "Python 3 is not installed or not on PATH." \
+        "  Install from https://www.python.org/downloads/
+  Then re-run this installer."
+fi
+echo "  Python 3: OK ($(python3 --version 2>&1))"
+
+if ! python3 -m pip --version >/dev/null 2>&1; then
+    fail "pip is not available for python3." \
+        "  Run: python3 -m ensurepip --upgrade
+  Or: python3 -m pip install --upgrade pip
+  Then re-run this installer."
+fi
+echo "  pip: OK ($(python3 -m pip --version 2>&1))"
+
 echo ""
 
 # --- Clone or update the repo ---
@@ -19,9 +55,9 @@ if [ -d "$INSTALL_DIR/.git" ]; then
     git pull --ff-only
 else
     if [ -d "$INSTALL_DIR" ]; then
-        echo "Error: $INSTALL_DIR exists but is not a git repo."
-        echo "Remove it and re-run this installer."
-        exit 1
+        fail "$INSTALL_DIR exists but is not a git repo." \
+            "  Remove the folder and re-run this installer:
+  rm -rf \"$INSTALL_DIR\""
     fi
     echo "Cloning repository..."
     git clone "$REPO_URL" "$INSTALL_DIR"
@@ -32,15 +68,36 @@ echo ""
 
 # --- Install Python dependencies ---
 echo "Installing Python dependencies..."
-pip3 install --user -r requirements.txt 2>/dev/null || pip3 install -r requirements.txt
+if python3 -m pip install --user -r requirements.txt; then
+    :
+elif python3 -m pip install -r requirements.txt; then
+    echo "  Note: --user install failed; installed without --user instead."
+else
+    fail "Failed to install Python dependencies (see pip output above)." \
+        "  Manual recovery:
+  cd \"$INSTALL_DIR\"
+  python3 -m pip install -r requirements.txt
+  python3 -c \"import requests, openpyxl; print('OK')\"
+  python3 github_stats.py"
+fi
+
+echo "Verifying dependencies..."
+if ! python3 -c "import requests, openpyxl; print('  Dependencies OK')"; then
+    fail "Dependencies installed but import check failed." \
+        "  Manual recovery:
+  cd \"$INSTALL_DIR\"
+  python3 -m pip install -r requirements.txt
+  python3 -c \"import requests, openpyxl; print('OK')\"
+  python3 github_stats.py"
+fi
+
 echo ""
 
 # --- Set up org.txt ---
 if [ ! -f "$INSTALL_DIR/org.txt" ]; then
     read -r -p "Enter the GitHub organization name: " org_name
     if [ -z "$org_name" ]; then
-        echo "Error: No organization name provided."
-        exit 1
+        fail "No organization name provided."
     fi
     echo "$org_name" > "$INSTALL_DIR/org.txt"
     echo "Saved org: $org_name"
@@ -106,6 +163,12 @@ echo "========================================="
 echo "  GitHub Team Stats"
 echo "========================================="
 echo ""
+python3 -c "import requests, openpyxl" 2>/dev/null || {
+    echo "Error: Missing dependencies. Run in Terminal:"
+    echo "  cd ~/github-stats && python3 -m pip install -r requirements.txt"
+    read -r -p "Press Enter to close..."
+    exit 1
+}
 python3 github_stats.py
 echo ""
 echo "-----------------------------------------"

@@ -9,6 +9,14 @@ $InstallDir = Join-Path $env:USERPROFILE "github-stats"
 $Desktop = [Environment]::GetFolderPath("Desktop")
 $Shortcut = Join-Path $Desktop "GitHub Stats.bat"
 
+function Write-InstallError {
+    param([string]$Message, [string]$Recovery = "")
+    Write-Host ""
+    Write-Host "Error: $Message" -ForegroundColor Red
+    if ($Recovery) { Write-Host $Recovery }
+    exit 1
+}
+
 function Find-Python {
     $candidates = @(
         @{ Exe = "py"; Args = @("-3") },
@@ -25,19 +33,69 @@ function Find-Python {
 
 function Invoke-Python {
     param([string[]]$PythonArgs)
-    $py = Find-Python
-    if (-not $py) {
+    $script:Py = if ($script:Py) { $script:Py } else { Find-Python }
+    if (-not $script:Py) {
+        Write-InstallError "Python 3 not found." @"
+  Install from https://www.python.org/downloads/
+  During setup, check 'Add python.exe to PATH', then re-run this installer.
+"@
+    }
+    if ($script:Py.Args.Count -gt 0) {
+        & $script:Py.Exe @($script:Py.Args + $PythonArgs)
+    } else {
+        & $script:Py.Exe @PythonArgs
+    }
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
+function Show-ManualRecovery {
+    Write-Host "  Manual recovery:"
+    Write-Host "    cd $InstallDir"
+    Write-Host "    python -m pip install -r requirements.txt"
+    Write-Host "    python -c ""import requests, openpyxl; print('OK')"""
+    Write-Host "    python github_stats.py"
+}
+
+function Invoke-PythonAllowFail {
+    param([string[]]$PythonArgs)
+    if ($script:Py.Args.Count -gt 0) {
+        & $script:Py.Exe @($script:Py.Args + $PythonArgs)
+    } else {
+        & $script:Py.Exe @PythonArgs
+    }
+    return $LASTEXITCODE
+}
+
+function Install-Dependencies {
+    Push-Location $InstallDir
+
+    Write-Host "Installing Python dependencies..."
+    $pipExit = Invoke-PythonAllowFail @("-m", "pip", "install", "--user", "-r", "requirements.txt")
+    if ($pipExit -ne 0) {
+        Write-Host "  Note: --user install failed; retrying without --user ..."
+        $pipExit = Invoke-PythonAllowFail @("-m", "pip", "install", "-r", "requirements.txt")
+    }
+    if ($pipExit -ne 0) {
+        Pop-Location
         Write-Host ""
-        Write-Host "Error: Python 3 not found. Install from https://www.python.org/downloads/"
-        Write-Host "  During setup, check 'Add python.exe to PATH'."
+        Write-Host "Error: Failed to install Python dependencies (see pip output above)." -ForegroundColor Red
+        Show-ManualRecovery
         exit 1
     }
-    if ($py.Args.Count -gt 0) {
-        & $py.Exe @($py.Args + $PythonArgs)
-    } else {
-        & $py.Exe @PythonArgs
+
+    Write-Host "Verifying dependencies..."
+    $verifyExit = Invoke-PythonAllowFail @("-c", "import requests, openpyxl; print('  Dependencies OK')")
+    if ($verifyExit -ne 0) {
+        Pop-Location
+        Write-Host ""
+        Write-Host "Error: Dependencies installed but import check failed." -ForegroundColor Red
+        Show-ManualRecovery
+        exit 1
     }
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Pop-Location
 }
 
 Write-Host ""
@@ -46,39 +104,55 @@ Write-Host "  GitHub Team Stats — Installer (Windows)"
 Write-Host "========================================="
 Write-Host ""
 
-# --- Git check ---
+# --- Preflight checks ---
+Write-Host "Checking prerequisites..."
+
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "Error: Git is not installed or not on PATH."
-    Write-Host "  Install Git for Windows: https://git-scm.com/download/win"
-    exit 1
+    Write-InstallError "Git is not installed or not on PATH." @"
+  Install Git for Windows: https://git-scm.com/download/win
+  Restart PowerShell, then re-run this installer.
+"@
 }
+Write-Host "  Git: OK"
+
+$script:Py = Find-Python
+if (-not $script:Py) {
+    Write-InstallError "Python 3 not found." @"
+  Install from https://www.python.org/downloads/
+  During setup, check 'Add python.exe to PATH', then re-run this installer.
+"@
+}
+$versionArgs = if ($script:Py.Args.Count -gt 0) { $script:Py.Args + @("--version") } else { @("--version") }
+$pyVersion = & $script:Py.Exe @versionArgs 2>&1
+Write-Host "  Python 3: OK ($pyVersion)"
+
+Invoke-Python @("-m", "pip", "--version")
+Write-Host "  pip: OK"
+
+Write-Host ""
 
 # --- Clone or update ---
 if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Host "Updating existing installation..."
     Push-Location $InstallDir
     git pull --ff-only
+    if ($LASTEXITCODE -ne 0) { Pop-Location; Write-InstallError "git pull failed." "  Check your network and try again." }
     Pop-Location
 } elseif (Test-Path $InstallDir) {
-    Write-Host "Error: $InstallDir exists but is not a git repo."
-    Write-Host "Remove it and re-run this installer."
-    exit 1
+    Write-InstallError "$InstallDir exists but is not a git repo." @"
+  Remove the folder and re-run this installer:
+    Remove-Item -Recurse -Force "$InstallDir"
+"@
 } else {
     Write-Host "Cloning repository..."
     git clone $RepoUrl $InstallDir
+    if ($LASTEXITCODE -ne 0) { Write-InstallError "git clone failed." "  Check your network and Git installation." }
 }
 
 Write-Host ""
 
-# --- Python dependencies ---
-Write-Host "Installing Python dependencies..."
-Push-Location $InstallDir
-try {
-    Invoke-Python @("-m", "pip", "install", "--user", "-r", "requirements.txt")
-} catch {
-    Invoke-Python @("-m", "pip", "install", "-r", "requirements.txt")
-}
-Pop-Location
+Install-Dependencies
+
 Write-Host ""
 
 # --- org.txt ---
@@ -86,8 +160,7 @@ $OrgFile = Join-Path $InstallDir "org.txt"
 if (-not (Test-Path $OrgFile)) {
     $orgName = Read-Host "Enter the GitHub organization name"
     if ([string]::IsNullOrWhiteSpace($orgName)) {
-        Write-Host "Error: No organization name provided."
-        exit 1
+        Write-InstallError "No organization name provided."
     }
     Set-Content -Path $OrgFile -Value $orgName.Trim()
     Write-Host "Saved org: $orgName"
@@ -142,7 +215,7 @@ if (-not (Test-Path $TeamFile)) {
 Write-Host ""
 
 # --- Desktop launcher ---
-$py = Find-Python
+$py = $script:Py
 $pyCmd = if ($py.Args.Count -gt 0) { "$($py.Exe) $($py.Args -join ' ')" } else { $py.Exe }
 
 $batContent = @"
@@ -158,6 +231,14 @@ echo =========================================
 echo   GitHub Team Stats
 echo =========================================
 echo.
+$pyCmd -c "import requests, openpyxl" 2>nul
+if errorlevel 1 (
+    echo Error: Missing dependencies. Run in PowerShell:
+    echo   cd %%USERPROFILE%%\github-stats
+    echo   $pyCmd -m pip install -r requirements.txt
+    pause
+    exit /b 1
+)
 $pyCmd github_stats.py
 echo.
 echo -----------------------------------------

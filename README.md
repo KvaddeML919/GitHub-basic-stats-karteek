@@ -223,6 +223,51 @@ All times are in **MYT (UTC+8)**. The lookback window ends at **yesterday** (tod
 
 ---
 
+## If installation fails
+
+The installer checks **Git**, **Python 3**, and **pip** first, then installs packages and verifies `requests` and `openpyxl` import correctly. If anything fails, read the error in the terminal — it includes manual recovery steps.
+
+### macOS — manual recovery
+
+```bash
+cd ~/github-stats
+python3 -m pip install -r requirements.txt
+python3 -c "import requests, openpyxl; print('OK')"
+python3 github_stats.py
+```
+
+| Installer message | What to do |
+|---|---|
+| **Git is not installed** | Run `xcode-select --install` or install from [git-scm.com](https://git-scm.com) |
+| **Python 3 is not installed** | Install from [python.org](https://www.python.org/downloads/) |
+| **pip is not available** | Run `python3 -m ensurepip --upgrade` then retry |
+| **Failed to install dependencies** | Run the commands above; copy any pip error (SSL, permission, network) |
+| **Import check failed** | Re-run `python3 -m pip install -r requirements.txt` |
+
+### Windows — manual recovery
+
+```powershell
+cd $env:USERPROFILE\github-stats
+python -m pip install -r requirements.txt
+python -c "import requests, openpyxl; print('OK')"
+python github_stats.py
+```
+
+If `python` is not found, try `py -3` instead of `python` in each command.
+
+| Installer message | What to do |
+|---|---|
+| **Git is not installed** | Install [Git for Windows](https://git-scm.com/download/win), restart PowerShell |
+| **Python 3 not found** | Install from [python.org](https://www.python.org/downloads/) with **Add to PATH** checked |
+| **Failed to install dependencies** | Run the commands above in PowerShell as your normal user |
+| **Import check failed** | Re-run `python -m pip install -r requirements.txt` |
+
+### Desktop shortcut says "Missing dependencies"
+
+Dependencies were not installed or Python changed after install. Run the manual recovery commands for your platform, then try the shortcut again.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -233,8 +278,10 @@ All times are in **MYT (UTC+8)**. The lookback window ends at **yesterday** (tod
 | "Organization not found" | Check `org.txt` — org name must match GitHub exactly |
 | All stats are zero | Token scopes or SSO issue -- check the error messages |
 | Some users show zero | Verify their GitHub username at `github.com/<username>` |
-| `pip: command not found` | Use `python -m pip install -r requirements.txt` (Windows) or `pip3` (Mac) |
+| Installer or pip errors | See [If installation fails](#if-installation-fails) |
+| `pip: command not found` | Use `python -m pip install -r requirements.txt` (Windows) or `python3 -m pip` (Mac) |
 | `python: command not found` | Install Python and add to PATH; on Windows try `py github_stats.py` |
+| `ModuleNotFoundError: requests` or `openpyxl` | `cd` to install folder and run `pip install -r requirements.txt` |
 | PowerShell script blocked | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use `-ExecutionPolicy Bypass` |
 | Git not found (Windows) | Install [Git for Windows](https://git-scm.com/download/win) and restart PowerShell |
 | Rate limit errors | Wait a few minutes and retry |
